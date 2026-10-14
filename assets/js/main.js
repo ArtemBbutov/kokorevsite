@@ -81,8 +81,16 @@ const fitStretch = () => {
   });
 };
 fitStretch();
-addEventListener('resize', fitStretch);
 document.fonts?.ready.then(fitStretch);
+let lastWidth = innerWidth, resizeTimer;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (innerWidth === lastWidth) return;
+    lastWidth = innerWidth;
+    fitStretch();
+  }, 150);
+});
 
 // ---------- Интро ----------
 (() => {
@@ -101,6 +109,8 @@ document.fonts?.ready.then(fitStretch);
       el.style.setProperty('--delay', '.5s');
       el.classList.add('is-in');
     });
+    // Буквы обложки доехали на место — перезамеряем их координаты
+    setTimeout(() => measure(), 1700);
   };
   requestAnimationFrame(tick);
 })();
@@ -161,39 +171,116 @@ if (!reduceMotion) {
   flicker();
 }
 
-// ---------- Курсор, отталкивание букв, магнитная кнопка ----------
-let mouseX = -9999, mouseY = -9999;
+// ---------- Какие секции сейчас на экране ----------
+// Тяжёлые анимации работают только пока их видно
+const visible = new WeakMap();
+const visObserver = new IntersectionObserver((entries) => {
+  entries.forEach((e) => visible.set(e.target, e.isIntersecting));
+}, { rootMargin: '120px 0px' });
+const watch = (el) => { if (el) { visible.set(el, false); visObserver.observe(el); } return el; };
+
+const cover = watch(document.querySelector('.cover'));
+const coverTitle = document.querySelector('.cover__title');
+const coverVideo = document.querySelector('.cover__video');
+const tracklist = watch(document.querySelector('.tracklist'));
+const disc = document.querySelector('.vinyl__disc');
+const casesSection = watch(document.querySelector('.cases'));
+const statement = document.querySelector('.statement');
+const progress = document.querySelector('.frame__progress i');
+const folders = [...document.querySelectorAll('.casefile:not(.casefile--next)')];
+const nextFolder = document.querySelector('.casefile--next');
+// Затемнение папок — отдельный слой с прозрачностью (дешевле фильтра яркости)
+const shades = folders.map((f) => {
+  const shade = document.createElement('i');
+  shade.className = 'casefile__shade';
+  f.querySelector('.casefile__body').append(shade);
+  return shade;
+});
+const wide = () => innerWidth > 1000;
+
+// ---------- Замеры: делаем редко, а не в каждом кадре ----------
+const geo = { coverH: 1, statementTop: 0, statementRange: 1, maxScroll: 1, tracklistTop: 0 };
+const letterBase = [];  // центры букв обложки без учёта отталкивания
+const measure = () => {
+  const y = scrollY;
+  geo.coverH = cover.offsetHeight || 1;
+  const sr = statement.getBoundingClientRect();
+  geo.statementTop = sr.top + y;
+  geo.statementRange = Math.max(statement.offsetHeight - innerHeight, 1);
+  geo.maxScroll = Math.max(document.documentElement.scrollHeight - innerHeight, 1);
+  geo.tracklistTop = tracklist.getBoundingClientRect().top + y;
+  letters.forEach((l, i) => {
+    const r = l.getBoundingClientRect();
+    const t = letterOffsets[i] || { x: 0, y: 0 };
+    letterBase[i] = { x: r.left + r.width / 2 - t.x, y: r.top + r.height / 2 - t.y + y };
+  });
+};
+const letterOffsets = letters.map(() => ({ x: 0, y: 0 }));
+
+// ---------- Всё, что зависит от прокрутки, — один обработчик ----------
+let lastLit = -1, scrollQueued = false;
+const onScroll = () => {
+  scrollQueued = false;
+  const y = scrollY;
+  progress.style.transform = `scaleX(${Math.min(y / geo.maxScroll, 1)})`;
+
+  // Обложка: при уходе заголовок гаснет и приподнимается (без размытия — оно тормозило)
+  if (!reduceMotion && y < geo.coverH * 1.2) {
+    const k = y / geo.coverH;
+    coverTitle.style.opacity = String(Math.max(1 - k * 1.1, 0));
+    coverTitle.style.transform = `translate3d(0, ${-k * 60}px, 0)`;
+    coverVideo.style.transform = `scale(${1 + k * 0.15})`;
+  }
+
+  // Слова заявления загораются по мере прокрутки — трогаем только изменившиеся
+  const sp = clamp01((y - geo.statementTop) / geo.statementRange);
+  const lit = reduceMotion ? words.length : Math.round(sp * 1.15 * words.length);
+  if (lit !== lastLit) {
+    const from = Math.min(lit, Math.max(lastLit, 0)), to = Math.max(lit, lastLit);
+    for (let i = from; i < Math.min(to, words.length); i++) words[i].classList.toggle('is-lit', i < lit);
+    lastLit = lit;
+  }
+
+  // Пластинка выезжает из конверта
+  if (visible.get(tracklist)) {
+    const p = clamp01((y + innerHeight - geo.tracklistTop) / (innerHeight * 0.9));
+    disc.style.setProperty('--slide', `${-30 + p * 62}%`);
+  }
+
+  // Папки кейсов: нижняя уходит вглубь стопки — сначала все замеры, потом все изменения
+  if (wide() && !reduceMotion && visible.get(casesSection)) {
+    const tops = [...folders, nextFolder].map((f) => f.getBoundingClientRect().top);
+    folders.forEach((f, i) => {
+      const p = 1 - clamp01((tops[i + 1] - tops[i]) / Math.max(f.offsetHeight, 1));
+      f.style.transform = p > 0.001 ? `scale(${1 - p * 0.05})` : '';
+      shades[i].style.opacity = String(p * 0.45);
+    });
+  }
+};
+const requestScroll = () => {
+  if (scrollQueued) return;
+  scrollQueued = true;
+  requestAnimationFrame(onScroll);
+};
+addEventListener('scroll', requestScroll, { passive: true });
+addEventListener('resize', () => { measure(); requestScroll(); });
+addEventListener('load', () => { measure(); requestScroll(); });
+document.fonts?.ready.then(() => { measure(); requestScroll(); });
+measure();
+requestScroll();
+
+// ---------- Покадровые анимации: курсор, буквы, пластинка ----------
+let mouseX = -9999, mouseY = -9999, mouseMoved = false;
+const cursor = document.querySelector('.cursor');
+let cx = innerWidth / 2, cy = innerHeight / 2;
+let rot = 0, speed = 0.35, targetSpeed = 0.35;
+
 if (finePointer && !reduceMotion) {
-  const cursor = document.querySelector('.cursor');
-  let cx = innerWidth / 2, cy = innerHeight / 2;
-  addEventListener('mousemove', (e) => { mouseX = e.clientX; mouseY = e.clientY; cursor.classList.add('is-visible'); });
+  addEventListener('mousemove', (e) => { mouseX = e.clientX; mouseY = e.clientY; mouseMoved = true; cursor.classList.add('is-visible'); }, { passive: true });
   document.addEventListener('mouseleave', () => { cursor.classList.remove('is-visible'); mouseX = mouseY = -9999; });
   document.addEventListener('mouseover', (e) => {
     cursor.classList.toggle('is-hover', !!e.target.closest('a, button, .track, .pin'));
   });
-
-  const offsets = letters.map(() => ({ x: 0, y: 0 }));
-  const loop = () => {
-    cx = lerp(cx, mouseX, 0.3); cy = lerp(cy, mouseY, 0.3);
-    cursor.style.transform = `translate(${cx}px, ${cy}px)`;
-    // Буквы разлетаются от курсора и плавно возвращаются
-    letters.forEach((l, i) => {
-      const r = l.getBoundingClientRect();
-      const dx = r.left + r.width / 2 - mouseX;
-      const dy = r.top + r.height / 2 - mouseY;
-      const dist = Math.hypot(dx, dy);
-      const force = Math.max(0, 1 - dist / 220);
-      const tx = dist ? (dx / dist) * force * 28 : 0;
-      const ty = dist ? (dy / dist) * force * 28 : 0;
-      offsets[i].x = lerp(offsets[i].x, tx, 0.06);
-      offsets[i].y = lerp(offsets[i].y, ty, 0.06);
-      l.style.translate = `${offsets[i].x}px ${offsets[i].y}px`;
-      l.style.rotate = `${offsets[i].x * 0.08}deg`;
-    });
-    requestAnimationFrame(loop);
-  };
-  loop();
-
   document.querySelectorAll('.magnetic').forEach((el) => {
     el.addEventListener('mousemove', (e) => {
       const r = el.getBoundingClientRect();
@@ -202,105 +289,53 @@ if (finePointer && !reduceMotion) {
     el.addEventListener('mouseleave', () => { el.style.transform = ''; });
   });
 }
+document.querySelectorAll('.track').forEach((t) => {
+  t.addEventListener('mouseenter', () => { targetSpeed = 1.6; });
+  t.addEventListener('mouseleave', () => { targetSpeed = 0.35; });
+});
 
-// ---------- Пластинка: крутится, быстрее при наведении на трек ----------
-(() => {
-  const disc = document.querySelector('.vinyl__disc');
-  const section = document.querySelector('.tracklist');
-  let rot = 0, speed = 0.35, target = 0.35;
-  document.querySelectorAll('.track').forEach((t) => {
-    t.addEventListener('mouseenter', () => { target = 1.6; });
-    t.addEventListener('mouseleave', () => { target = 0.35; });
-  });
-  const loop = () => {
-    speed = lerp(speed, target, 0.03);
-    if (!reduceMotion) rot = (rot + speed) % 360;
-    // Пластинка выезжает из конверта, пока секция проходит экран
-    const r = section.getBoundingClientRect();
-    const p = clamp01((innerHeight - r.top) / (innerHeight * 0.9));
-    disc.style.setProperty('--rot', `${rot}deg`);
-    disc.style.setProperty('--slide', `${-30 + p * 62}%`);
-    requestAnimationFrame(loop);
-  };
-  loop();
-})();
+const frame = () => {
+  requestAnimationFrame(frame);
+  if (reduceMotion) return;
 
-// ---------- Скролл: заявление, папки кейсов, прогресс, обложка ----------
-(() => {
-  const statement = document.querySelector('.statement');
-  const folders = [...document.querySelectorAll('.casefile')];
-  const progress = document.querySelector('.frame__progress i');
-  const cover = document.querySelector('.cover');
-  const coverTitle = document.querySelector('.cover__title');
-  const coverVideo = document.querySelector('.cover__video');
-  const wide = () => innerWidth > 1000;
-
-  const tick = () => {
-    const y = scrollY;
-    const max = document.documentElement.scrollHeight - innerHeight;
-    progress.style.transform = `scaleX(${y / Math.max(max, 1)})`;
-
-    // Слова заявления загораются по мере прокрутки
-    const sr = statement.getBoundingClientRect();
-    const sp = clamp01(-sr.top / Math.max(statement.offsetHeight - innerHeight, 1));
-    const lit = Math.round(sp * 1.15 * words.length);
-    words.forEach((w, i) => w.classList.toggle('is-lit', reduceMotion || i < lit));
-
-    // Папки кейсов: нижняя уходит вглубь стопки, когда на неё ложится следующая
-    if (wide() && !reduceMotion) {
-      folders.forEach((f, i) => {
-        const next = folders[i + 1];
-        if (!next) return;
-        const gap = next.getBoundingClientRect().top - f.getBoundingClientRect().top;
-        const p = 1 - clamp01(gap / Math.max(f.offsetHeight, 1));
-        f.style.transform = `scale(${1 - p * 0.05})`;
-        f.style.filter = `brightness(${1 - p * 0.45})`;
+  if (finePointer) {
+    // Курсор догоняет мышь; когда догнал — ничего не пишем
+    if (Math.abs(mouseX - cx) > 0.1 || Math.abs(mouseY - cy) > 0.1) {
+      cx = lerp(cx, mouseX, 0.3); cy = lerp(cy, mouseY, 0.3);
+      cursor.style.transform = `translate3d(${cx}px, ${cy}px, 0)`;
+    }
+    // Буквы обложки отталкиваются от курсора — только пока обложка на экране
+    if (visible.get(cover) && (mouseMoved || letterOffsets.some((o) => Math.abs(o.x) + Math.abs(o.y) > 0.05))) {
+      mouseMoved = false;
+      const y = scrollY;
+      letters.forEach((l, i) => {
+        const base = letterBase[i];
+        if (!base) return;
+        const dx = base.x - mouseX, dy = base.y - y - mouseY;
+        const dist = Math.hypot(dx, dy);
+        const force = Math.max(0, 1 - dist / 220);
+        const o = letterOffsets[i];
+        o.x = lerp(o.x, dist ? (dx / dist) * force * 28 : 0, 0.08);
+        o.y = lerp(o.y, dist ? (dy / dist) * force * 28 : 0, 0.08);
+        l.style.translate = `${o.x.toFixed(2)}px ${o.y.toFixed(2)}px`;
       });
     }
+  }
 
-    // Обложка уходит в размытие
-    if (!reduceMotion && y < cover.offsetHeight * 1.2) {
-      const k = y / cover.offsetHeight;
-      coverTitle.style.filter = `blur(${k * 16}px)`;
-      coverTitle.style.opacity = String(1 - k * 0.8);
-      coverVideo.style.transform = `scale(${1 + k * 0.2})`;
-    }
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-})();
-
-// ---------- Корешок дела: номер листа по текущей секции ----------
-(() => {
-  const b = document.querySelector('.spine__sheet b');
-  let current = '01';
-  const obs = new IntersectionObserver((entries) => {
-    entries.forEach((e) => {
-      if (!e.isIntersecting || e.target.dataset.sheet === current) return;
-      current = e.target.dataset.sheet;
-      b.classList.add('is-changing');
-      setTimeout(() => { b.textContent = current; b.classList.remove('is-changing'); }, 300);
-    });
-  }, { rootMargin: '-50% 0px -50% 0px' });
-  document.querySelectorAll('[data-sheet]').forEach((sec) => obs.observe(sec));
-})();
-
-// ---------- Сияния чуть смещаются при прокрутке ----------
-(() => {
-  if (reduceMotion) return;
-  const glows = [...document.querySelectorAll('.glow')];
-  const speeds = [-0.08, 0.05, -0.04];
-  const tick = () => {
-    glows.forEach((g, i) => { g.style.translate = `0 ${scrollY * speeds[i]}px`; });
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-})();
+  // Пластинка крутится, только пока её видно
+  if (visible.get(tracklist)) {
+    speed = lerp(speed, targetSpeed, 0.03);
+    rot = (rot + speed) % 360;
+    disc.style.setProperty('--rot', `${rot.toFixed(2)}deg`);
+  }
+};
+requestAnimationFrame(frame);
 
 // ---------- Пыль и царапины старой плёнки ----------
 (() => {
-  if (reduceMotion) return;
   const canvas = document.querySelector('.dust');
+  // На телефонах пыль не рисуем — экономим батарею и кадры
+  if (reduceMotion || !finePointer || innerWidth < 1000) { canvas.remove(); return; }
   const ctx = canvas.getContext('2d');
   let w, h, last = 0;
   const scratches = [];
@@ -350,5 +385,5 @@ const videoObserver = new IntersectionObserver((entries) => {
     if (isIntersecting && !reduceMotion) target.play().catch(() => {});
     else target.pause();
   });
-}, { threshold: 0.1 });
+}, { threshold: 0.01, rootMargin: '200px 0px' });  // запускаем чуть заранее, чтобы видео успело начаться
 document.querySelectorAll('video').forEach((v) => videoObserver.observe(v));
